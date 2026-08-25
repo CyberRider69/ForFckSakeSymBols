@@ -24,8 +24,7 @@ jobs:
           cd kernel
           RAW="b0fb2a6d"
           MATCH=""
-          do
-            CANDIDATE="${RAW}"
+          CANDIDATE="${RAW}"
             if git rev-parse --verify --quiet "${CANDIDATE}^{commit}" > /dev/null; then
               MATCH="${CANDIDATE}"
               break
