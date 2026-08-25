@@ -46,34 +46,28 @@ jobs:
       - name: Patch clang-19 inline-asm constraint incompatibilities
         run: |
           cd kernel
-          # arch_spin_lock/arch_spin_trylock and two pgtable accessors use
-          # "I"/"L" immediate constraints for values that ARE valid AArch64
-          # immediates (shifted-add / bitmask-logical forms), but clang 19's
-          # inline-asm Sema check rejects them at compile time before the
-          # assembler ever runs. Fix: force these operands through a
-          # register instead of an immediate. Same instructions execute,
-          # same runtime behavior — just one extra register load per site.
-          # No functional or ABI change, so this carries no boot risk.
-
           set -e
 
-          f=arch/arm64/include/asm/spinlock.h
-          grep -q '"I" (1 << TICKET_SHIFT)' "$f" || { echo "PATCH TARGET NOT FOUND in $f — aborting"; exit 1; }
-          sed -i 's/"I" (1 << TICKET_SHIFT)/"r" (1 << TICKET_SHIFT)/g' "$f"
+          # REVERTED: this step previously force-converted "I"/"L" immediate
+          # constraints in spinlock.h (TICKET_SHIFT) and pgtable.h (PTE_AF,
+          # PTE_RDONLY) to "r" register constraints, on the assumption clang
+          # rejected them as immediates. That assumption was wrong — these
+          # values ARE valid AArch64 immediates and clang accepts them fine.
+          # Forcing them into registers instead broke the actual instruction
+          # encoding:
+          #   - ubfx's #lsb/#width fields must be compile-time immediates —
+          #     a register there ("ubfx w8, w11, x10, #1") is not a legal
+          #     encoding, hence "unrecognized instruction mnemonic".
+          #   - the spinlock add lost its %w-width modifier once %3 became a
+          #     register operand, producing an illegal 32/64-bit register
+          #     mix ("add w10, w10, x9").
+          # Confirmed by an actual build: reverting to the original "I"/"L"
+          # immediates removes both errors. If a genuine constraint issue
+          # ever resurfaces here, the correct fix is to add %w/%x width
+          # modifiers to the asm template — not to change immediate
+          # constraints to register constraints.
 
-          f=arch/arm64/include/asm/pgtable.h
-          grep -q '"L" (~PTE_AF), "I" (ilog2(PTE_AF))' "$f" || { echo "PATCH TARGET NOT FOUND (PTE_AF) in $f — aborting"; exit 1; }
-          sed -i 's/"L" (~PTE_AF), "I" (ilog2(PTE_AF))/"r" (~PTE_AF), "r" (ilog2(PTE_AF))/' "$f"
-
-          grep -q '"r" (PTE_DIRTY|PTE_RDONLY), "L" (PTE_RDONLY), "L" (~PTE_WRITE)' "$f" || { echo "PATCH TARGET NOT FOUND (PTE_RDONLY) in $f — aborting"; exit 1; }
-          sed -i 's/"r" (PTE_DIRTY|PTE_RDONLY), "L" (PTE_RDONLY), "L" (~PTE_WRITE)/"r" (PTE_DIRTY|PTE_RDONLY), "r" (PTE_RDONLY), "r" (~PTE_WRITE)/' "$f"
-
-          echo "--- Verifying patched lines ---"
-          grep -n '"r" (1 << TICKET_SHIFT)' arch/arm64/include/asm/spinlock.h
-          grep -n '"r" (~PTE_AF), "r" (ilog2(PTE_AF))' arch/arm64/include/asm/pgtable.h
-          grep -n '"r" (PTE_DIRTY|PTE_RDONLY), "r" (PTE_RDONLY), "r" (~PTE_WRITE)' arch/arm64/include/asm/pgtable.h
-
-          # clang refuses to bind a *global register variable* to "sp"
+          echo "spinlock.h / pgtable.h: left at original immediate constraints (no patch needed)"
           # specifically (unlike other GPRs) since it needs full control
           # of the stack pointer for its own codegen — this is a hard
           # clang restriction, not a bug. Old kernel code declared
