@@ -6,7 +6,7 @@ on:
 env:
   KERNEL_REPO: https://github.com/tedomi2705/kernel_xiaomi_sdm845.git
   KERNEL_BRANCH: vic
-  CLANG_VERSION: "19.1.7"
+  CLANG_VERSION: "r536225"   # AOSP clang 19.0.1 — as it matches this device's actual boot string
   ARCH: arm64
 
 jobs:
@@ -50,11 +50,15 @@ jobs:
             bc bison build-essential flex libssl-dev libelf-dev \
             python3 python3-pip rsync git curl wget xz-utils
 
-      - name: Download and Install Clang ${{ env.CLANG_VERSION }} Prebuilt
+      - name: Download and Install AOSP Clang ${{ env.CLANG_VERSION }} Prebuilt
         run: |
           mkdir -p $GITHUB_WORKSPACE/toolchain
-          wget "https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/LLVM-${CLANG_VERSION}-Linux-X64.tar.xz"
-          tar -xf "LLVM-${CLANG_VERSION}-Linux-X64.tar.xz" -C $GITHUB_WORKSPACE/toolchain --strip-components=1
+          # Pulls just this one clang directory out of the (huge) AOSP prebuilts
+          # repo via googlesource's archive-tarball endpoint, instead of cloning
+          # the whole history. clang-r536225 = clang 19.0.1, the exact build
+          # this device's stock/nightly kernel reports in its boot string.
+          wget "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${CLANG_VERSION}.tar.gz"
+          tar -xf "clang-${CLANG_VERSION}.tar.gz" -C $GITHUB_WORKSPACE/toolchain
           echo "$GITHUB_WORKSPACE/toolchain/bin" >> "$GITHUB_PATH"
 
       - name: Verify clang version
