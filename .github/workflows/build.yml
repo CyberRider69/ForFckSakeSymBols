@@ -73,6 +73,52 @@ jobs:
           grep -n '"r" (~PTE_AF), "r" (ilog2(PTE_AF))' arch/arm64/include/asm/pgtable.h
           grep -n '"r" (PTE_DIRTY|PTE_RDONLY), "r" (PTE_RDONLY), "r" (~PTE_WRITE)' arch/arm64/include/asm/pgtable.h
 
+          # clang refuses to bind a *global register variable* to "sp"
+          # specifically (unlike other GPRs) since it needs full control
+          # of the stack pointer for its own codegen — this is a hard
+          # clang restriction, not a bug. Old kernel code declared
+          # current_stack_pointer as a global register variable bound to
+          # sp; replace it with a static inline that reads sp via a plain
+          # "mov" inline-asm instruction instead, exposed under the same
+          # identifier via a macro so every call site is unaffected.
+          f=arch/arm64/include/asm/stack_pointer.h
+          grep -q 'register unsigned long current_stack_pointer asm ("sp");' "$f" || { echo "PATCH TARGET NOT FOUND in $f — aborting"; exit 1; }
+          # NOTE: a `cat > "$f" << 'EOF'` heredoc here previously broke, because
+          # its body sat at column 0 while it's nested inside this `run: |`
+          # YAML block scalar. YAML block scalars require every line to stay
+          # at or above the indentation of the block's first line — a
+          # de-dented line ends the block early, so the C source was parsed
+          # as YAML structure instead of shell script content, and the file
+          # was never actually rewritten. printf keeps everything on
+          # normally-indented lines, so it can't trip that rule. TAB is built
+          # via printf rather than bash's $'\t' so this also works verbatim
+          # under /bin/sh, not just bash.
+          TAB="$(printf '\t')"
+          printf '%s\n' \
+            '#ifndef __ASM_STACK_POINTER_H' \
+            '#define __ASM_STACK_POINTER_H' \
+            '' \
+            '/*' \
+            ' * how to get the current stack pointer from C' \
+            ' */' \
+            'static __always_inline unsigned long __current_stack_pointer(void)' \
+            '{' \
+            "${TAB}unsigned long sp;" \
+            "${TAB}asm (\"mov %0, sp\" : \"=r\" (sp));" \
+            "${TAB}return sp;" \
+            '}' \
+            '#define current_stack_pointer __current_stack_pointer()' \
+            '' \
+            '#endif /* __ASM_STACK_POINTER_H */' \
+            > "$f"
+          echo "--- Verifying stack_pointer.h ---"
+          cat "$f"
+          grep -q 'register unsigned long current_stack_pointer asm ("sp");' "$f" && \
+            { echo "FATAL: old 'register sp' line still present after patch — write did not take effect"; exit 1; }
+          grep -q '__current_stack_pointer' "$f" || \
+            { echo "FATAL: new inline-asm content missing after patch"; exit 1; }
+          echo "stack_pointer.h patch confirmed on disk: $(sha256sum "$f")"
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -224,6 +270,30 @@ jobs:
               echo "MISSING  CONFIG_${opt}  <- dropped by olddefconfig, NetHunter functionality may break"
             fi
           done
+
+      - name: Sanity-check patches survived up to build time
+        run: |
+          cd kernel
+          # Runs immediately before the real build. If this ever fails while
+          # the patch step above succeeded, something *between* the two
+          # steps (olddefconfig, O=out staleness, a config step touching the
+          # tree, etc.) is reverting the change — this pinpoints exactly
+          # when, instead of letting clang fail deep inside asm-offsets.s
+          # with a confusing "register sp" error that looks like the patch
+          # never ran at all.
+          set -e
+          f=arch/arm64/include/asm/stack_pointer.h
+          echo "--- stack_pointer.h immediately before build ---"
+          cat "$f"
+          if grep -q 'register unsigned long current_stack_pointer asm ("sp");' "$f"; then
+            echo "FATAL: stack_pointer.h reverted to unpatched content before build started."
+            echo "The 'Patch clang-19...' step succeeded earlier, so something after it"
+            echo "restored the original file. Check whether O=out is stale from a"
+            echo "previous run, or whether any step between here and the patch does"
+            echo "a git checkout/reset/clean on the kernel tree."
+            exit 1
+          fi
+          echo "OK: stack_pointer.h still patched. sha256: $(sha256sum "$f")"
 
       - name: Build full kernel
         continue-on-error: true
