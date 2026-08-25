@@ -6,7 +6,7 @@ on:
 env:
   KERNEL_REPO: https://github.com/tedomi2705/kernel_xiaomi_sdm845.git
   KERNEL_BRANCH: vic
-  CLANG_VERSION: "19.0.1"
+  CLANG_VERSION: "19.1.7"
   ARCH: arm64
 
 jobs:
