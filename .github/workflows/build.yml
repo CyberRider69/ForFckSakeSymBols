@@ -1,0 +1,184 @@
+name: Build Kernel with symbols
+
+on:
+  workflow_dispatch:
+
+env:
+  KERNEL_REPO: https://github.com/tedomi2705/kernel_xiaomi_sdm845.git
+  KERNEL_BRANCH: vic
+  CLANG_VERSION: "19.0.1"
+  ARCH: arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow repo (for stored config)
+        uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+
+      - name: Clone kernel source
+        run: |
+          git clone --branch "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel
+          cd kernel
+          RAW="b0fb2a6d"
+          MATCH=""
+          do
+            CANDIDATE="${RAW}"
+            if git rev-parse --verify --quiet "${CANDIDATE}^{commit}" > /dev/null; then
+              MATCH="${CANDIDATE}"
+              break
+            fi
+          done
+          if git checkout "${MATCH}"
+            echo "Pinned to commit: $(git rev-parse HEAD)"
+          fi
+          echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Clean source tree
+        run: |
+          cd kernel
+          # mrproper wipes those so the out-of-tree build can start clean.
+          make mrproper || true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential flex libssl-dev libelf-dev \
+            python3 python3-pip rsync git curl wget xz-utils
+
+      - name: Download and Install Clang ${{ env.CLANG_VERSION }} Prebuilt
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/toolchain
+          wget "https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/LLVM-${CLANG_VERSION}-Linux-X64.tar.xz"
+          tar -xf "LLVM-${CLANG_VERSION}-Linux-X64.tar.xz" -C $GITHUB_WORKSPACE/toolchain --strip-components=1
+          echo "$GITHUB_WORKSPACE/toolchain/bin" >> "$GITHUB_PATH"
+
+      - name: Verify clang version
+        run: |
+          clang --version || true
+          
+      - name: Apply stored device config
+        run: |
+          mkdir -p kernel/out
+          cp workflow-repo/.github/workflows/configs/kernel.config kernel/out/.config
+
+      - name: Enable required config symbols (binfmt_misc + namespace/container/overlay)
+        run: |
+          cd kernel
+          # All =y, built directly into the kernel image
+          for opt in \
+            CONFIG_BINFMT_MISC \
+            CONFIG_USER_NS \
+            CONFIG_NET_NSH \
+            CONFIG_KPROBES \
+            CONFIG_UPROBES \
+            CONFIG_CHECKPOINT_RESTORE \
+            CONFIG_OVERLAY_FS_REDIRECT_DIR \
+            CONFIG_SYSVIPC \
+            CONFIG_PID_NS \
+            CONFIG_UTS_NS \
+            CONFIG_FHANDLE \
+            CONFIG_SQUASHFS \
+            CONFIG_XZ_DEC \
+            CONFIG_SECURITYFS \
+            CONFIG_MEMFD_CREATE \
+            CONFIG_EXT4_FS_POSIX_ACL \
+            CONFIG_DEVTMPFS \
+            CONFIG_VETH \
+            CONFIG_CGROUP_DEVICE \
+            CONFIG_CGROUP_PIDS \
+            CONFIG_VT \
+            CONFIG_DEVTMPFS_MOUNT \
+            CONFIG_DEVPTS_FS \
+            CONFIG_BLK_CGROUP \
+            CONFIG_SYSVIPC_SYSCTL \
+            CONFIG_NF_TABLES \
+            CONFIG_NAMESPACES \
+          do
+            ./scripts/config --file out/.config --enable "${opt#CONFIG_}"
+          done
+          
+      - name: Check which symbols actually exist in this tree's Kconfig
+        run: |
+          for opt in UPROBES XZ_DEC CGROUP_PIDS \
+            CHECKPOINT_RESTORE EXT4_FS_POSIX_ACL UTS_NS \
+            NF_TABLES SECURITYFS VT VETH PID_NS NET_NSH \
+            BLK_CGROUP CGROUP_DEVICE MEMFD_CREATE FANOTIFY FHANDLE SYSVIPC \
+            SYSVIPC_SYSCTL DEVTMPFS DEVTMPFS_MOUNT DEVPTS_FS \
+            BINFMT_MISC USER_NS SQUASHFS NAMESPACES ; do
+            if grep -rq "^config ${opt}\$" --include='Kconfig*' .; then
+              echo "REAL   CONFIG_${opt}"
+            else
+              echo "GHOST  CONFIG_${opt}  <- no Kconfig entry in this tree, enabling it does nothing"
+            fi
+          done
+
+      - name: Reconcile config (olddefconfig)
+        run: |
+          cd kernel
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
+
+      - name: Verify final config
+        run: |
+          echo "Checking out/.config BEFORE build (this is what actually gets compiled):"
+          grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_NET_NSH|CONFIG_KPROBES|CONFIG_UPROBES|CONFIG_CHECKPOINT_RESTORE|CONFIG_OVERLAY_FS_REDIRECT_DIR|CONFIG_SYSVIPC|CONFIG_PID_NS|CONFIG_UTS_NS|CONFIG_FHANDLE|CONFIG_SQUASHFS|CONFIG_XZ_DEC|CONFIG_SECURITYFS|CONFIG_MEMFD_CREATE|CONFIG_EXT4_FS_POSIX_ACL|CONFIG_DEVTMPFS|CONFIG_VETH|CONFIG_CGROUP_DEVICE|CONFIG_CGROUP_PIDS|CONFIG_VT|CONFIG_DEVTMPFS_MOUNT|CONFIG_DEVPTS_FS|CONFIG_BLK_CGROUP|CONFIG_SYSVIPC_SYSCTL|CONFIG_NF_TABLES|CONFIG_NAMESPACES" out/.config
+
+      - name: Build full kernel
+        run: |
+          cd kernel
+          make -j"$(nproc)" ARCH="$ARCH" O=out LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error"
+
+
+      - name: Fetch AK3 template
+        run: |
+          pip install gdown
+          gdown "https://drive.google.com/uc?id=1MAb7snGkXk5prCRXJ0a9H2Z9n6MD5n80" -O "Hayasaka-beryllium-4.9.337-ksu-next-susfs-20250622.zip"
+
+          mkdir -p AK3_extracted AK3
+          unzip -o "Hayasaka-beryllium-4.9.337-ksu-next-susfs-20250622.zip" -d AK3_extracted
+          # Copy everything from the template except the old kernel image —
+          # anykernel.sh, ramdisk patches, KernelSU-Next installer scripts,
+          # etc. all carry over unchanged; only Image.gz-dtb gets replaced
+          # with what this run just built.
+          find AK3_extracted -type f ! -name "Image.gz-dtb" -print0 | \
+          while IFS= read -r -d '' f; do
+            rel="${f#AK3_extracted/}"
+            mkdir -p "AK3/$(dirname "$rel")"
+            cp "$f" "AK3/$rel"
+          done
+
+      - name: Package flashable AK3 zip
+        run: |
+          # This tree's full kernel build is expected to fail on an
+          # unrelated missing vendor blob (see "Build full kernel image"
+          # above), so Image/Image.gz-dtb may not exist. Only package if
+          # the build actually produced one — skip cleanly otherwise
+          # rather than shipping a broken zip.
+          IMAGE_PATH=""
+          for candidate in \
+            kernel/out/arch/arm64/boot/Image.gz-dtb \
+            kernel/out/arch/arm64/boot/Image.gz \
+            kernel/out/arch/arm64/boot/Image
+          do
+            if [ -f "$candidate" ]; then
+              IMAGE_PATH="$candidate"
+              break
+            fi
+          done
+
+          cp "$IMAGE_PATH" AK3/Image.gz-dtb
+          cd AK3
+          zip -r9 "../Hayasaka-beryllium-${KERNEL_COMMIT}.zip" . -x ".git*"
+          cd ..
+          ls -la "Hayasaka-beryllium-${KERNEL_COMMIT}.zip"
+
+      - name: Upload flashable AK3 zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashable-zip-${{ env.KERNEL_COMMIT }}
+          path: Hayasaka-beryllium-*.zip
+          if-no-files-found: ignore
+          
