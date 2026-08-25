@@ -6,7 +6,7 @@ on:
 env:
   KERNEL_REPO: https://github.com/tedomi2705/kernel_xiaomi_sdm845.git
   KERNEL_BRANCH: vic
-  CLANG_VERSION: "r536225"   # AOSP clang 19.0.1 — as it matches this device's actual boot string
+  CLANG_VERSION: "r536225"   # AOSP clang 19.0.1 — matches this device's actual boot string
   ARCH: arm64
 
 jobs:
@@ -64,6 +64,18 @@ jobs:
       - name: Verify clang version
         run: |
           clang --version || true
+
+      - name: Download 32-bit GCC for compat vDSO (CROSS_COMPILE_ARM32)
+        run: |
+          # arch/arm64/Makefile refuses to build without this: the 64-bit
+          # clang/LLVM toolchain alone can't produce the 32-bit vDSO blob
+          # needed for compat (32-bit app) support. AOSP dropped the GCC
+          # binaries from its own googlesource mirror years ago, so pull
+          # LineageOS's mirror instead — same prebuilt, still intact.
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
+            $GITHUB_WORKSPACE/toolchain-arm32
+          echo "ARM32_GCC_PATH=$GITHUB_WORKSPACE/toolchain-arm32/bin/arm-linux-androideabi-" >> "$GITHUB_ENV"
           
       - name: Apply stored device config
         run: |
@@ -108,6 +120,7 @@ jobs:
           
       - name: Check which symbols actually exist in this tree's Kconfig
         run: |
+          cd kernel
           for opt in UPROBES XZ_DEC CGROUP_PIDS \
             CHECKPOINT_RESTORE EXT4_FS_POSIX_ACL UTS_NS \
             NF_TABLES SECURITYFS VT VETH PID_NS NET_NSH \
@@ -121,10 +134,28 @@ jobs:
             fi
           done
 
+      - name: Debug dependency chains for NetHunter-critical symbols
+        run: |
+          cd kernel
+          # UPROBES isn't on NetHunter's critical path (chroot/container/KeX
+          # don't use it) — checked for completeness, but the ones below are
+          # what actually break NetHunter if olddefconfig silently drops them.
+          for opt in UPROBES USER_NS NAMESPACES PID_NS UTS_NS \
+            OVERLAY_FS OVERLAY_FS_REDIRECT_DIR BINFMT_MISC CGROUP_DEVICE CGROUP_PIDS BLK_CGROUP; do
+            echo "=== ${opt} ==="
+            entry=$(grep -rn "^config ${opt}\$" --include='Kconfig*' -A6 . 2>/dev/null)
+            if [ -z "$entry" ]; then
+              echo "  NO KCONFIG ENTRY — enabling this does nothing in this tree"
+            else
+              echo "$entry" | sed 's/^/  /'
+            fi
+          done
+
       - name: Reconcile config (olddefconfig)
         run: |
           cd kernel
-          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE_ARM32="${ARM32_GCC_PATH}" olddefconfig
 
       - name: Verify final config
         run: |
@@ -132,11 +163,23 @@ jobs:
           echo "Checking out/.config BEFORE build (this is what actually gets compiled):"
           grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_NET_NSH|CONFIG_KPROBES|CONFIG_UPROBES|CONFIG_CHECKPOINT_RESTORE|CONFIG_OVERLAY_FS_REDIRECT_DIR|CONFIG_SYSVIPC|CONFIG_PID_NS|CONFIG_UTS_NS|CONFIG_FHANDLE|CONFIG_SQUASHFS|CONFIG_XZ_DEC|CONFIG_SECURITYFS|CONFIG_MEMFD_CREATE|CONFIG_EXT4_FS_POSIX_ACL|CONFIG_DEVTMPFS|CONFIG_VETH|CONFIG_CGROUP_DEVICE|CONFIG_CGROUP_PIDS|CONFIG_VT|CONFIG_DEVTMPFS_MOUNT|CONFIG_DEVPTS_FS|CONFIG_BLK_CGROUP|CONFIG_SYSVIPC_SYSCTL|CONFIG_NF_TABLES|CONFIG_NAMESPACES" out/.config
 
+          echo ""
+          echo "--- NetHunter-critical subset (chroot/container/KeX depend on these) ---"
+          for opt in USER_NS NAMESPACES PID_NS UTS_NS OVERLAY_FS OVERLAY_FS_REDIRECT_DIR BINFMT_MISC CGROUP_DEVICE CGROUP_PIDS BLK_CGROUP; do
+            line=$(grep "^CONFIG_${opt}=" out/.config)
+            if [ -n "$line" ]; then
+              echo "OK    $line"
+            else
+              echo "MISSING  CONFIG_${opt}  <- dropped by olddefconfig, NetHunter functionality may break"
+            fi
+          done
+
       - name: Build full kernel
         continue-on-error: true
         run: |
           cd kernel
-          make -j"$(nproc)" ARCH="$ARCH" O=out LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error"
+          make -j"$(nproc)" ARCH="$ARCH" O=out LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error" \
+            CROSS_COMPILE_ARM32="${ARM32_GCC_PATH}"
 
 
       - name: Fetch AK3 template
