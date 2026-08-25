@@ -143,7 +143,7 @@ jobs:
           for opt in UPROBES USER_NS NAMESPACES PID_NS UTS_NS \
             OVERLAY_FS OVERLAY_FS_REDIRECT_DIR BINFMT_MISC CGROUP_DEVICE CGROUP_PIDS BLK_CGROUP; do
             echo "=== ${opt} ==="
-            entry=$(grep -rn "^config ${opt}\$" --include='Kconfig*' -A6 . 2>/dev/null)
+            entry=$(grep -rn "^config ${opt}\$" --include='Kconfig*' -A6 . 2>/dev/null || true)
             if [ -z "$entry" ]; then
               echo "  NO KCONFIG ENTRY — enabling this does nothing in this tree"
             else
@@ -166,7 +166,7 @@ jobs:
           echo ""
           echo "--- NetHunter-critical subset (chroot/container/KeX depend on these) ---"
           for opt in USER_NS NAMESPACES PID_NS UTS_NS OVERLAY_FS OVERLAY_FS_REDIRECT_DIR BINFMT_MISC CGROUP_DEVICE CGROUP_PIDS BLK_CGROUP; do
-            line=$(grep "^CONFIG_${opt}=" out/.config)
+            line=$(grep "^CONFIG_${opt}=" out/.config || true)
             if [ -n "$line" ]; then
               echo "OK    $line"
             else
