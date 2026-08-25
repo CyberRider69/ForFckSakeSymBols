@@ -252,6 +252,7 @@ jobs:
         run: |
           cd kernel
           make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32="${ARM32_GCC_PATH}" olddefconfig
 
       - name: Verify final config
@@ -295,11 +296,33 @@ jobs:
           fi
           echo "OK: stack_pointer.h still patched. sha256: $(sha256sum "$f")"
 
+      - name: Debug why vdso build uses wrong register names (x0/x8/x29 'unknown')
+        run: |
+          cd kernel
+          # arch/arm64/kernel/vdso/vgettimeofday.o and sigreturn.o fail with
+          # "unknown register name 'x0'" and "invalid instruction mnemonic
+          # 'svc'" — those are valid AArch64 names/instructions, so the
+          # assembler must be targeting something other than arm64 for this
+          # one subdirectory, even though the rest of the tree (which built
+          # clean) is clearly targeting arm64 correctly. The vdso Makefile in
+          # this fork is old/legacy code that predates LLVM=1 auto-detecting
+          # the clang target — it typically derives --target= from the
+          # traditional CROSS_COMPILE prefix instead, and this workflow only
+          # ever sets CROSS_COMPILE_ARM32 (for the 32-bit compat vdso), never
+          # plain CROSS_COMPILE for the 64-bit build. Printing the relevant
+          # Makefile(s) here so the theory is visible in the log, not assumed.
+          echo "--- arch/arm64/kernel/vdso/Makefile ---"
+          cat arch/arm64/kernel/vdso/Makefile 2>/dev/null || echo "not found at that path"
+          echo ""
+          echo "--- grep for target/triple/CROSS_COMPILE handling in it ---"
+          grep -nE 'target|CROSS_COMPILE|CC_FLAGS|VDSO_CFLAGS' arch/arm64/kernel/vdso/Makefile 2>/dev/null || true
+
       - name: Build full kernel
         continue-on-error: true
         run: |
           cd kernel
           make -j"$(nproc)" ARCH="$ARCH" O=out LLVM=1 LLVM_IAS=1 KCFLAGS="-Wno-error" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32="${ARM32_GCC_PATH}"
 
 
